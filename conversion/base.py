@@ -1628,6 +1628,9 @@ class TextModel(ModelBase):
         if chkhsh == "36f3066e97b7f3994b379aaacde306c1444c6ae84e81a5ae3cd2b7ed3b8c42d4":
             # ref: https://huggingface.co/openbmb/MiniCPM5-1B
             res = "minicpm5"
+        if chkhsh == "972da7b59cec44d1f0a490a86c96df53859e486e481563e5dddac155013d87ac":
+            # ref: https://huggingface.co/poolside/Laguna-XS.2
+            res = "llama-bpe"
 
         if res is None:
             logger.warning("\n")
