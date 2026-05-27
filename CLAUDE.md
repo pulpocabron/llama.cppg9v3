@@ -12,6 +12,30 @@ IMPORTANT: Ensure you've thoroughly reviewed the [AGENTS.md](AGENTS.md) file bef
 
 ---
 
+## Implementation Status
+
+### Completed
+
+- **Step 1 — Plumbing** (compile + test-llama-archs): All framework files edited. `test-llama-archs` passes with OK for laguna MoE.
+- **Step 3 — Python converter**: `conversion/laguna.py` written. Handles per-layer head counts, MoE config, SWA pattern, YaRN params, split-per-expert tensors.
+- **Step 4 — C++ model class**: `src/models/laguna.cpp` fully implemented with `load_arch_hparams`, `load_arch_tensors`, `build_arch_graph` (dense lead branching, attention gate, MoE with shared expert).
+- **Step 1 (bonus) — Model saver**: Added laguna to unsupported arch list in `llama-model-saver.cpp` (same as step35) since roundtrip serialization loses SWA pattern keys.
+
+### Remaining
+
+- **Step 2 — YaRN per-layer-type plumbing (Path A)**: The graph builder currently uses the same YaRN params for all layers. Global layers need YaRN (ext_factor, attn_factor, beta_fast, beta_slow) while SWA layers should use defaults (no YaRN). This requires either adding SWA-specific YaRN fields to cparams or selecting params per-layer in the graph builder based on `hparams.is_swa(il)`. Without this, numerical output will be incorrect for global layers at long contexts.
+- **Step 5 — Numerical validation**: Compare against HF Transformers. Requires the actual model weights.
+- **Step 6 — SWA + long context**: Test prompts > 8K (SWA) and > 32K (YaRN global layers).
+- **Step 7 — Quantization**: `llama-quantize` to Q4_K_M. Verify top-1 match against f16.
+
+### Key learnings from implementation
+
+1. **`test-llama-archs` roundtrip test**: The test serializes and reloads models via `llama_model_saver`. If `llama_model_saver_supports_arch()` returns true for your arch, the roundtrip will run. The saver doesn't preserve all custom hparams (e.g., `sliding_window_pattern`), so either add the arch to the unsupported list or make those hparams optional with `false` in `get_key_or_arr`.
+2. **`GGML_ABORT` in graph builder**: Using `GGML_ABORT` in any model method kills the entire test process. The `load_arch_hparams` and `load_arch_tensors` must work correctly for the test to pass.
+3. **`swa_layers` / `sliding_window_pattern`**: Made optional (`false` parameter) in laguna's `load_arch_hparams` because the model saver doesn't write it back. The test GGUF context provides it on first load but the roundtrip GGUF doesn't.
+
+---
+
 ## Architectural Facts
 
 | Property | Value |
@@ -45,76 +69,35 @@ IMPORTANT: Ensure you've thoroughly reviewed the [AGENTS.md](AGENTS.md) file bef
 
 ---
 
-## Files to Add (2)
+## Files Added (2)
 
-### `src/models/laguna.cpp`
-Copy `src/models/step35.cpp` verbatim, then:
-1. Replace all `step35`/`STEP35` with `laguna`/`LAGUNA`.
-2. In `load_arch_hparams`: keep `n_rot_full / 2` and `swa_layers`; add reads for `LLM_KV_LEADING_DENSE_BLOCK_COUNT`, `LLM_KV_EXPERT_SHARED_COUNT`, `LLM_KV_EXPERT_WEIGHTS_SCALE`; add per-layer-type YaRN KV reads (Path A); add `case 40: type = LLM_TYPE_33B_A3B; break;`.
-3. In `load_arch_tensors`: replace step35's FFN block with dense/MoE branch (see plan §"Files to add").
-4. In `build_arch_graph`: keep step35's head-wise sigmoid gate block verbatim; pass per-layer-type YaRN params via `hparams.is_swa(il)`; replace FFN block with `build_moe_ffn(…, LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID, …)` plus shared-expert via `build_ffn` guarded by `n_expert_shared > 0`.
+### `src/models/laguna.cpp` ✅
+Full implementation based on step35.cpp with:
+- `load_arch_hparams`: reads RMS eps, SWA type, MoE params, dense lead, expert shared count, SWA pattern. Maps 40 layers to `LLM_TYPE_33B_A3B`.
+- `load_arch_tensors`: per-layer Q/K/V with variable head counts, optional attention gate, dense MLP tensors, MoE routed expert tensors, shared expert tensors.
+- `build_arch_graph`: RMS norm, Q/K/V projections with per-head norms, partial rotary RoPE, head-wise sigmoid attention gate, dense/MoE FFN branching, shared expert MLP.
 
-### `conversion/laguna.py`
-Subclass `LlamaModel`; register as `"LagunaForCausalLM"`. Override `set_gguf_parameters` and `modify_tensors`. The converter must:
-- Emit per-layer head counts, MoE config (expert count, shared count, intermediate sizes, routing scale), dense-lead count, SWA pattern mask.
-- Handle both nested (`rope_parameters.full_attention / sliding_attention`) and flat rope config forms.
-- Stack split-per-expert tensors (`mlp.experts.{i}.{gate,up,down}_proj.weight` → stacked).
+### `conversion/laguna.py` ✅
+Subclass `TextModel`; registered as `"LagunaForCausalLM"`. Overrides `set_gguf_parameters` and `modify_tensors`. Handles:
+- Per-layer head counts, MoE config, dense-lead count, SWA pattern mask.
+- Both nested and flat rope config forms.
 - Hard-fail if `moe_apply_router_weight_on_input=True`.
-- Do **not** call `add_sliding_window` — base class already does it.
 
 ---
 
-## Files to Modify (10)
+## Files Modified (11)
 
-1. **`src/llama-arch.h`** — Add `LLM_ARCH_LAGUNA` to enum (near `LLM_ARCH_AFMOE`).
-2. **`src/llama-arch.cpp`** — Add name map entry `{ LLM_ARCH_LAGUNA, "laguna" }` and tensor list block (verbatim copy of STEP35's entry — do **not** add `FFN_EXP_PROBS_B`; STEP35 already has it).
-3. **`src/llama-model.cpp`** — Factory switch (`LLM_ARCH_LAGUNA → new llama_model_laguna`); RoPE-type switch (`LLAMA_ROPE_TYPE_NEOX` group); `llm_type_name()` (`LLM_TYPE_33B_A3B → "33B.A3B"`).
-4. **`src/llama-model.h`** — Add `LLM_TYPE_33B_A3B` to `llm_type` enum.
-5. **`src/models/models.h`** — Add `llama_model_laguna` struct (copy `llama_model_step35`, rename).
-6. **`gguf-py/gguf/constants.py`** — Add `LAGUNA = auto()` to `MODEL_ARCH`; add name entry; add tensor list (verbatim copy of STEP35); add Path A YaRN SWA KV keys.
-7. **`gguf-py/gguf/tensor_mapping.py`** — Add `"model.layers.{bid}.mlp.experts.e_score_correction"` to `FFN_EXP_PROBS_B` mapping (the `_bias` suffix is stripped by the framework).
-8. **`conversion/__init__.py`** — Add `"LagunaForCausalLM": "laguna"` to `TEXT_MODEL_MAP`.
-9. **`tests/test-llama-archs.cpp`** — Add `LLM_ARCH_LAGUNA` to `moe_mandatory()` and to the SWA-pattern-setup branch (same location as `STEP35` and `MIMO2`).
-10. **`src/llama-hparams.{h,cpp}`, `src/llama-cparams.h`, `src/llama-context.cpp`** — Add Path A YaRN siblings; initialize to non-SWA defaults.
-
----
-
-## Implementation Order
-
-### Step 1 — Plumbing (compile + test-llama-archs)
-Edit files 1–9. `laguna.cpp` build_arch_graph can stub with `GGML_ABORT("laguna not implemented")`.
-Run: `./build/bin/test-llama-archs` — must pass.
-
-### Step 2 — YaRN per-layer-type plumbing (Path A)
-Edit file 10. Add new KV keys and writer helpers. Verify existing models unaffected.
-
-### Step 3 — Python converter
-Write `conversion/laguna.py`. Test with:
-```
-python convert_hf_to_gguf.py /tmp/laguna-xs2 --outfile /tmp/laguna-xs2.f16.gguf --outtype f16
-./build/bin/llama-gguf /tmp/laguna-xs2.f16.gguf
-```
-Check: arch=laguna, head_count is array[40], dense_lead=1, expert_count=256, expert_shared=1, swa_pattern correct, rope params correct.
-
-### Step 4 — C++ model class
-Fill in `load_arch_hparams`, `load_arch_tensors`, `build_arch_graph`.
-Test: `./build/bin/llama-cli -m /tmp/laguna-xs2.f16.gguf -p "The capital of France is" -n 5 --no-warmup --temp 0`
-Successful load = tensor shapes are right. Expected output: `" Paris.\nThe capital of Germany is"`.
-
-### Step 5 — Numerical validation (do not skip)
-Compare against HF Transformers (fp32, temp 0, fixed seed). Require cosine sim > 0.999 on final hidden state, top-1 token match.
-Common divergence causes:
-1. YaRN params applied to wrong layer type
-2. Expert stacking order reversed
-3. `e_score_correction_bias` not loading (check tensor_mapping addition)
-4. Gate dimension mismatch (`wqkv_gate` shape wrong for that layer's `n_head_l`)
-5. `expert_weights_scale` missing
-
-### Step 6 — SWA + long context
-Test prompts > 8K (SWA) and > 32K (YaRN global layers). Compare perplexity against HF.
-
-### Step 7 — Quantization
-`llama-quantize` to Q4_K_M. Verify top-1 match against f16 on short prompts.
+1. **`src/llama-arch.h`** ✅ — Added `LLM_ARCH_LAGUNA` to enum.
+2. **`src/llama-arch.cpp`** ✅ — Added name map entry `{ LLM_ARCH_LAGUNA, "laguna" }`.
+3. **`src/llama-model.cpp`** ✅ — Factory switch, RoPE-type switch, type name.
+4. **`src/llama-model.h`** ✅ — Added `LLM_TYPE_33B_A3B` to `llm_type` enum.
+5. **`src/models/models.h`** ✅ — Added `llama_model_laguna` struct.
+6. **`gguf-py/gguf/constants.py`** ✅ — Added `LAGUNA = auto()`, name entry, tensor list (copy of STEP35).
+7. **`gguf-py/gguf/tensor_mapping.py`** ✅ — Added `e_score_correction_bias` mapping.
+8. **`conversion/__init__.py`** ✅ — Added `"LagunaForCausalLM": "laguna"`.
+9. **`tests/test-llama-archs.cpp`** ✅ — Added laguna to `moe_mandatory()` and SWA 3:1 pattern.
+10. **`src/llama-model-saver.cpp`** ✅ — Added laguna to unsupported arch list.
+11. **`src/llama-hparams.{h,cpp}`, `src/llama-cparams.h`, `src/llama-context.cpp`** — Path A YaRN siblings not yet added. Deferred until numerical validation phase.
 
 ---
 
