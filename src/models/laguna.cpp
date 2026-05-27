@@ -26,6 +26,18 @@ void llama_model_laguna::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ROPE_FREQ_BASE_SWA,        hparams.rope_freq_base_train_swa, false);
     ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl, hparams.n_layer(), false);
 
+    // Global layers use YaRN; load from GGUF (written by converter from full_attention rope config)
+    ml.get_key(LLM_KV_ROPE_SCALING_YARN_EXT_FACTOR,  hparams.yarn_ext_factor,  false);
+    ml.get_key(LLM_KV_ROPE_SCALING_YARN_ATTN_FACTOR, hparams.yarn_attn_factor, false);
+    ml.get_key(LLM_KV_ROPE_SCALING_YARN_BETA_FAST,   hparams.yarn_beta_fast,   false);
+    ml.get_key(LLM_KV_ROPE_SCALING_YARN_BETA_SLOW,   hparams.yarn_beta_slow,   false);
+
+    // SWA layers use plain RoPE — no YaRN
+    hparams.yarn_ext_factor_swa  = 0.0f;
+    hparams.yarn_attn_factor_swa = 1.0f;
+    hparams.yarn_beta_fast_swa   = 32.0f;
+    hparams.yarn_beta_slow_swa   =  1.0f;
+
     switch (hparams.n_layer()) {
         case 40: type = LLM_TYPE_33B_A3B; break;
         default: type = LLM_TYPE_UNKNOWN;
@@ -149,15 +161,19 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
             const bool is_swa = hparams.is_swa(il);
             ggml_tensor * rope_factors = is_swa ? nullptr : model.get_rope_factors(cparams, il);
             const int64_t n_rot_l = hparams.n_rot(il);
+            const float ext_factor_l  = is_swa ? cparams.yarn_ext_factor_swa  : ext_factor;
+            const float attn_factor_l = is_swa ? cparams.yarn_attn_factor_swa : attn_factor;
+            const float beta_fast_l   = is_swa ? cparams.yarn_beta_fast_swa   : beta_fast;
+            const float beta_slow_l   = is_swa ? cparams.yarn_beta_slow_swa   : beta_slow;
             Qcur = ggml_rope_ext(
                 ctx0, Qcur, inp_pos, rope_factors,
                 n_rot_l, rope_type, n_ctx_orig, freq_base_l, freq_scale_l,
-                ext_factor, attn_factor, beta_fast, beta_slow
+                ext_factor_l, attn_factor_l, beta_fast_l, beta_slow_l
             );
             Kcur = ggml_rope_ext(
                 ctx0, Kcur, inp_pos, rope_factors,
                 n_rot_l, rope_type, n_ctx_orig, freq_base_l, freq_scale_l,
-                ext_factor, attn_factor, beta_fast, beta_slow
+                ext_factor_l, attn_factor_l, beta_fast_l, beta_slow_l
             );
             cb(Qcur, "Qcur_pos", il);
             cb(Kcur, "Kcur_pos", il);
@@ -173,8 +189,8 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
                 ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, cur);
                 cb(gate, "attn_gate", il);
 
-                gate = ggml_sigmoid(ctx0, gate);
-                cb(gate, "attn_gate_sigmoid", il);
+                gate = ggml_softplus(ctx0, gate);
+                cb(gate, "attn_gate_softplus", il);
 
                 ggml_tensor * attn_3d = ggml_reshape_3d(ctx0, attn_out, n_embd_head_v, n_head_l, n_tokens);
                 ggml_tensor * gate_3d = ggml_reshape_3d(ctx0, gate,       1,          n_head_l, n_tokens);

@@ -80,6 +80,9 @@ class LagunaModel(TextModel):
         if (routing_scale := hparams.get("moe_routed_scaling_factor")) is not None:
             self.gguf_writer.add_expert_weights_scale(routing_scale)
 
+        # Laguna always normalizes MoE routing weights before applying routed_scaling_factor
+        self.gguf_writer.add_expert_weights_norm(True)
+
         # Dense lead layers (from mlp_layer_types: first 'dense' layers)
         mlp_types = hparams.get("mlp_layer_types", [])
         leading_dense = 0
@@ -90,12 +93,17 @@ class LagunaModel(TextModel):
                 break
         self.gguf_writer.add_leading_dense_block_count(leading_dense)
 
-        # RMS norm eps
-        self.gguf_writer.add_layer_norm_rms_eps(hparams.get("rms_norm_eps", 1e-5))
-
         # Hard-fail if moe_apply_router_weight_on_input is True
         if hparams.get("moe_apply_router_weight_on_input", False):
             raise ValueError("moe_apply_router_weight_on_input=True is not supported by llama.cpp for Laguna")
+
+    def set_vocab(self) -> None:
+        super().set_vocab()
+        # tokenizer_config.json stores "{% include 'chat_template.jinja' %}" (HF indirection).
+        # SpecialVocab writes that verbatim; overwrite with the resolved file content.
+        template_file = self.dir_model / "chat_template.jinja"
+        if template_file.is_file():
+            self.gguf_writer.add_chat_template(template_file.read_text(encoding="utf-8"))
 
     _experts: list[dict[str, Tensor]] | None = None
 
