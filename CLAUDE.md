@@ -109,5 +109,5 @@ Subclass `TextModel`; registered as `"LagunaForCausalLM"`. Overrides `set_gguf_p
 ## Reference Output
 Greedy decoding on `"The capital of France is"` → `" Paris.\nThe capital of Germany is"` (from sgl-project empirical reproducer).
 
-## Open Item
-`moe_router_logit_softcapping`: if non-zero in config.json, plumb through `LLM_KV_EXPERT_GATING_LOGIT_SOFTCAP` to `build_moe_ffn`. If zero, defer to follow-up.
+## Open Items
+None. `moe_router_logit_softcapping` is absent from `poolside/Laguna-XS.2` config.json — no plumbing needed.
