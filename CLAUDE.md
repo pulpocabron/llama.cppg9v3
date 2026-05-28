@@ -22,6 +22,7 @@ IMPORTANT: Ensure you've thoroughly reviewed the [AGENTS.md](AGENTS.md) file bef
 - **Step 4 — C++ model class**: `src/models/laguna.cpp` fully implemented with `load_arch_hparams`, `load_arch_tensors`, `build_arch_graph` (dense lead branching, attention gate, MoE with shared expert).
 - **Step 1 (bonus) — Model saver**: Added laguna to unsupported arch list in `llama-model-saver.cpp` (same as step35) since roundtrip serialization loses SWA pattern keys.
 - **Step 6 — SWA + long context**: 10K prompt (SWA) clean; 35K needle-in-haystack ("SWORDFISH99") correctly retrieved, confirming YaRN global layers work.
+- **Chat template + streaming parser**: `models/templates/poolside-Laguna.jinja` added; name registration and auto-detection via `laguna_glm_thinking_v5` marker in `src/llama-chat.cpp`/`.h`. Autoparser workaround in `common/chat-diff-analyzer.cpp` fixes two streaming bugs (see learnings 9–10).
 
 ### Remaining
 
@@ -38,6 +39,8 @@ IMPORTANT: Ensure you've thoroughly reviewed the [AGENTS.md](AGENTS.md) file bef
 6. **Chat template HF indirection**: `tokenizer_config.json` stores `{% include 'chat_template.jinja' %}` — SpecialVocab writes this verbatim. Override `set_vocab` to read and write `chat_template.jinja` directly.
 7. **EOT token from `eos_token_id` list**: `config.json` has `eos_token_id: [2, 24]`. SpecialVocab only registers index 0 as EOS; token 24 (`</assistant>`) must be written as EOT via `add_eot_token_id` so it gets added to `special_eog_ids`. Without this the model loops past turn boundaries.
 8. **ABI mismatch after cparams change**: Adding fields to `llama_cparams` (Step 2) requires a full rebuild of all binaries that link against `libllama-common`. A partial rebuild will crash with unexpected behavior.
+9. **Prefilled thinking token breaks autoparser**: Laguna prefills `<think>` as the generation prompt prefix (thinking=on). Auto-detection finds `<think>` as `reasoning.start` from template diffs, but it never appears in the generated stream — the parser never enters reasoning mode. Fix: set `reasoning.start = ""` (delimiter-style) in the workaround. The `analyze_reasoning::build_parser` was extended to return `p.eps()` when `start.empty() && !ctx.inputs.enable_thinking`, preventing the streaming parser from misclassifying all plain content as reasoning when thinking is disabled (`--reasoning off`).
+10. **EOT token as regular vocab token**: `</assistant>` (token 24) is a regular vocabulary token, not a special token. `preserved_tokens` only controls special-token decode and doesn't suppress it. Use `additional_stops` instead — this feeds into `task->params.antiprompt` which the `process_token` stop-word erase logic checks, stripping the text before it's sent. Added `additional_stops` field to `autoparser` struct; apply in `cli.cpp` as `task.params.antiprompt` additions.
 
 ---
 
@@ -103,6 +106,12 @@ Subclass `TextModel`; registered as `"LagunaForCausalLM"`. Overrides `set_gguf_p
 9. **`tests/test-llama-archs.cpp`** ✅ — Added laguna to `moe_mandatory()` and SWA 3:1 pattern.
 10. **`src/llama-model-saver.cpp`** ✅ — Added laguna to unsupported arch list.
 11. **`src/llama-hparams.h`, `src/llama-cparams.h`, `src/llama-context.cpp`** ✅ — Path A YaRN siblings added: `yarn_ext_factor_swa`, `yarn_attn_factor_swa`, `yarn_beta_fast_swa`, `yarn_beta_slow_swa`.
+12. **`src/llama-chat.h`, `src/llama-chat.cpp`** ✅ — `LLM_CHAT_TEMPLATE_LAGUNA` enum value, name map entry, auto-detection via `laguna_glm_thinking_v5` marker, C++ fallback formatter.
+13. **`models/templates/poolside-Laguna.jinja`** ✅ — Full Jinja template extracted from GGUF; `{%- generation -%}` block added; `enable_thinking` variable controls `<think>`/`</think>` prefix in generation prompt.
+14. **`common/chat-auto-parser.h`** ✅ — Added `additional_stops` field to `autoparser` struct.
+15. **`common/chat-auto-parser-generator.cpp`** ✅ — Propagate `autoparser.additional_stops` into `data.additional_stops`; check `ctx.inputs.enable_thinking` in `analyze_reasoning::build_parser` for empty-start case.
+16. **`common/chat-diff-analyzer.cpp`** ✅ — Laguna workaround: `reasoning.start=""`, `reasoning.end="</think>"`, `mode=TAG_BASED`, `additional_stops=["</assistant>"]`.
+17. **`tools/cli/cli.cpp`** ✅ — Apply `chat_params.additional_stops` to `task.params.antiprompt` so the CLI stop-word erase logic strips them from streaming output.
 
 ---
 
