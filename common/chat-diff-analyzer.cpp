@@ -165,6 +165,14 @@ static std::vector<std::function<void(const common_chat_template & tmpl, autopar
               LOG_DBG(ANSI_ORANGE "[Patch: Apriel 1.6]\n" ANSI_RESET);
           }
       },
+      // Laguna (poolside) - </assistant> is both the EOT token and the role-closing tag;
+      // auto-detection leaves content.end empty so it never lands in preserved_tokens.
+      [](const common_chat_template & tmpl, autoparser & analysis) -> void {
+          if (tmpl.src.find("laguna_glm_thinking_v5") != std::string::npos) {
+              analysis.preserved_tokens.push_back("</assistant>");
+              LOG_DBG(ANSI_ORANGE "[Patch: Laguna]\n" ANSI_RESET);
+          }
+      },
 
     });
 
