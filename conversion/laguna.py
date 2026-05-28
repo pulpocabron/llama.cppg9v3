@@ -104,6 +104,13 @@ class LagunaModel(TextModel):
         template_file = self.dir_model / "chat_template.jinja"
         if template_file.is_file():
             self.gguf_writer.add_chat_template(template_file.read_text(encoding="utf-8"))
+        # config.json has eos_token_id: [2, 24]; SpecialVocab only registers the first as EOS.
+        # Token 24 (</assistant>) is the end-of-turn token — register it as EOT so llama.cpp
+        # adds it to special_eog_ids and generation stops at turn boundaries.
+        eos_ids = self.hparams.get("eos_token_id", [])
+        if isinstance(eos_ids, list):
+            for tok_id in eos_ids[1:]:
+                self.gguf_writer.add_eot_token_id(tok_id)
 
     _experts: list[dict[str, Tensor]] | None = None
 
