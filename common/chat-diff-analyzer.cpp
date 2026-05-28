@@ -173,11 +173,21 @@ static std::vector<std::function<void(const common_chat_template & tmpl, autopar
               LOG_DBG(ANSI_ORANGE "[Patch: JSON name/parameters tool instruction]\n" ANSI_RESET);
           }
       },
-      // Laguna (poolside) - </assistant> is both the EOT token and the role-closing tag;
-      // auto-detection leaves content.end empty so it never lands in preserved_tokens.
+      // Laguna (poolside): <think> is prefilled in the generation prompt, so the model's
+      // generated output starts with thinking content directly (no <think> marker in stream).
+      // Auto-detection picks up <think> as reasoning.start from multi-turn history diffs,
+      // which breaks the live parser since <think> is never in the generated token stream.
+      // Fix: clear reasoning.start so the parser treats generation-start as reasoning-start
+      // when enable_thinking=true; analyze_reasoning::build_parser skips reasoning entirely
+      // when enable_thinking=false to avoid misclassifying plain content as reasoning.
+      // Also: </assistant> is the EOT token and role-closing tag — add it to additional_stops
+      // so it is erased from streaming output (both server API and CLI) before being sent.
       [](const common_chat_template & tmpl, autoparser & analysis) -> void {
           if (tmpl.src.find("laguna_glm_thinking_v5") != std::string::npos) {
-              analysis.preserved_tokens.push_back("</assistant>");
+              analysis.reasoning.start = "";
+              analysis.reasoning.end   = "</think>";
+              analysis.reasoning.mode  = reasoning_mode::TAG_BASED;
+              analysis.additional_stops.push_back("</assistant>");
               LOG_DBG(ANSI_ORANGE "[Patch: Laguna]\n" ANSI_RESET);
           }
       },
