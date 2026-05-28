@@ -17,22 +17,27 @@ IMPORTANT: Ensure you've thoroughly reviewed the [AGENTS.md](AGENTS.md) file bef
 ### Completed
 
 - **Step 1 — Plumbing** (compile + test-llama-archs): All framework files edited. `test-llama-archs` passes with OK for laguna MoE.
-- **Step 3 — Python converter**: `conversion/laguna.py` written. Handles per-layer head counts, MoE config, SWA pattern, YaRN params, split-per-expert tensors.
+- **Step 2 — YaRN per-layer-type plumbing (Path A)**: Added SWA YaRN sibling fields to `llama_hparams`/`llama_cparams`; initialized in `llama-context.cpp`; per-layer selection in `laguna.cpp` graph builder via `is_swa(il)`.
+- **Step 3 — Python converter**: `conversion/laguna.py` written. Handles per-layer head counts, MoE config, SWA pattern, YaRN params, split-per-expert tensors. Also writes correct chat template (resolves HF `{% include %}` indirection) and EOT token ID.
 - **Step 4 — C++ model class**: `src/models/laguna.cpp` fully implemented with `load_arch_hparams`, `load_arch_tensors`, `build_arch_graph` (dense lead branching, attention gate, MoE with shared expert).
 - **Step 1 (bonus) — Model saver**: Added laguna to unsupported arch list in `llama-model-saver.cpp` (same as step35) since roundtrip serialization loses SWA pattern keys.
+- **Step 6 — SWA + long context**: 10K prompt (SWA) clean; 35K needle-in-haystack ("SWORDFISH99") correctly retrieved, confirming YaRN global layers work.
 
 ### Remaining
 
-- **Step 2 — YaRN per-layer-type plumbing (Path A)**: The graph builder currently uses the same YaRN params for all layers. Global layers need YaRN (ext_factor, attn_factor, beta_fast, beta_slow) while SWA layers should use defaults (no YaRN). This requires either adding SWA-specific YaRN fields to cparams or selecting params per-layer in the graph builder based on `hparams.is_swa(il)`. Without this, numerical output will be incorrect for global layers at long contexts.
-- **Step 5 — Numerical validation**: Compare against HF Transformers. Requires the actual model weights.
-- **Step 6 — SWA + long context**: Test prompts > 8K (SWA) and > 32K (YaRN global layers).
-- **Step 7 — Quantization**: `llama-quantize` to Q4_K_M. Verify top-1 match against f16.
+- **Step 5 — Numerical validation**: Compare against HF Transformers. Requires CUDA/ROCm — not feasible on current hardware (AMD RX 7900 XT, no ROCm setup). Defer to a CUDA machine.
+- **Step 7 — Quantization top-1 check**: Run f16 GGUF CPU-only (mmap) and compare top-1 tokens against Q4_K_M on GPU for a short prompt. Feasible but slow (f16 = 67 GB, exceeds 60 GB RAM; MoE means actual resident pages are manageable for a few tokens).
 
 ### Key learnings from implementation
 
 1. **`test-llama-archs` roundtrip test**: The test serializes and reloads models via `llama_model_saver`. If `llama_model_saver_supports_arch()` returns true for your arch, the roundtrip will run. The saver doesn't preserve all custom hparams (e.g., `sliding_window_pattern`), so either add the arch to the unsupported list or make those hparams optional with `false` in `get_key_or_arr`.
 2. **`GGML_ABORT` in graph builder**: Using `GGML_ABORT` in any model method kills the entire test process. The `load_arch_hparams` and `load_arch_tensors` must work correctly for the test to pass.
 3. **`swa_layers` / `sliding_window_pattern`**: Made optional (`false` parameter) in laguna's `load_arch_hparams` because the model saver doesn't write it back. The test GGUF context provides it on first load but the roundtrip GGUF doesn't.
+4. **Attention gate is softplus, not sigmoid**: HF code uses `F.softplus(g)`, not `torch.sigmoid(g)`. The initial implementation used `ggml_sigmoid`; fixed to `ggml_softplus` (1-op in ggml).
+5. **`expert_weights_norm` must be True**: Laguna normalizes routing weights before applying `moe_routed_scaling_factor`. Without this, MoE output magnitudes are wrong.
+6. **Chat template HF indirection**: `tokenizer_config.json` stores `{% include 'chat_template.jinja' %}` — SpecialVocab writes this verbatim. Override `set_vocab` to read and write `chat_template.jinja` directly.
+7. **EOT token from `eos_token_id` list**: `config.json` has `eos_token_id: [2, 24]`. SpecialVocab only registers index 0 as EOS; token 24 (`</assistant>`) must be written as EOT via `add_eot_token_id` so it gets added to `special_eog_ids`. Without this the model loops past turn boundaries.
+8. **ABI mismatch after cparams change**: Adding fields to `llama_cparams` (Step 2) requires a full rebuild of all binaries that link against `libllama-common`. A partial rebuild will crash with unexpected behavior.
 
 ---
 
@@ -45,7 +50,7 @@ IMPORTANT: Ensure you've thoroughly reviewed the [AGENTS.md](AGENTS.md) file bef
 | KV heads | 8 (GQA) |
 | SWA window | 512 tokens |
 | Q/K norm | RMSNorm |
-| Attention gate | `self_attn.g_proj`, head-wise sigmoid, SWA layers only, applied to SDPA output before `o_proj` |
+| Attention gate | `self_attn.g_proj`, head-wise **softplus**, SWA layers only, applied to SDPA output before `o_proj` |
 | MoE router | Sigmoid + `e_score_correction_bias` added at selection time only |
 | Experts | 256 routed (top-8) + 1 shared |
 | Dense layers | Layer 0 only (`n_layer_dense_lead = 1`) |
@@ -75,7 +80,7 @@ IMPORTANT: Ensure you've thoroughly reviewed the [AGENTS.md](AGENTS.md) file bef
 Full implementation based on step35.cpp with:
 - `load_arch_hparams`: reads RMS eps, SWA type, MoE params, dense lead, expert shared count, SWA pattern. Maps 40 layers to `LLM_TYPE_33B_A3B`.
 - `load_arch_tensors`: per-layer Q/K/V with variable head counts, optional attention gate, dense MLP tensors, MoE routed expert tensors, shared expert tensors.
-- `build_arch_graph`: RMS norm, Q/K/V projections with per-head norms, partial rotary RoPE, head-wise sigmoid attention gate, dense/MoE FFN branching, shared expert MLP.
+- `build_arch_graph`: RMS norm, Q/K/V projections with per-head norms, partial rotary RoPE, head-wise softplus attention gate (SWA only), dense/MoE FFN branching, shared expert MLP.
 
 ### `conversion/laguna.py` ✅
 Subclass `TextModel`; registered as `"LagunaForCausalLM"`. Overrides `set_gguf_parameters` and `modify_tensors`. Handles:
@@ -97,7 +102,7 @@ Subclass `TextModel`; registered as `"LagunaForCausalLM"`. Overrides `set_gguf_p
 8. **`conversion/__init__.py`** ✅ — Added `"LagunaForCausalLM": "laguna"`.
 9. **`tests/test-llama-archs.cpp`** ✅ — Added laguna to `moe_mandatory()` and SWA 3:1 pattern.
 10. **`src/llama-model-saver.cpp`** ✅ — Added laguna to unsupported arch list.
-11. **`src/llama-hparams.{h,cpp}`, `src/llama-cparams.h`, `src/llama-context.cpp`** — Path A YaRN siblings not yet added. Deferred until numerical validation phase.
+11. **`src/llama-hparams.h`, `src/llama-cparams.h`, `src/llama-context.cpp`** ✅ — Path A YaRN siblings added: `yarn_ext_factor_swa`, `yarn_attn_factor_swa`, `yarn_beta_fast_swa`, `yarn_beta_slow_swa`.
 
 ---
 
