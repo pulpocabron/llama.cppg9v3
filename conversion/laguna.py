@@ -35,7 +35,7 @@ class LagunaModel(TextModel):
         n_head_base = hparams["num_attention_heads"]
         n_kv_base = hparams.get("num_key_value_heads", n_head_base)
 
-        layer_types = hparams.get("layer_types", [])
+        layer_types = hparams.get("layer_types", ["full_attention"] * n_layers)
 
         # Per-layer head counts: use num_attention_heads_per_layer if available
         heads_per_layer = hparams.get("num_attention_heads_per_layer", None)
@@ -65,6 +65,23 @@ class LagunaModel(TextModel):
         # Per-layer value length (head_dim)
         head_dim = hparams.get("head_dim", hparams["hidden_size"] // n_head_base)
         self.gguf_writer.add_value_length(head_dim)
+
+        # Partial rotary is data-driven: write rope.dimension_count for the global
+        # (full-attention) layers and rope.dimension_count_swa for sliding layers.
+        # Laguna-M uses full rotary (1.0) on every layer; Laguna-XS uses half rotary
+        # (0.5) on global layers and full rotary on SWA layers.
+        full_rope    = self.rope_parameters.get("full_attention", {})
+        partial_full = full_rope.get("partial_rotary_factor", 1.0)
+        self.gguf_writer.add_rope_dimension_count(int(head_dim * partial_full))
+        swa_rope = self.rope_parameters.get("sliding_attention")
+        if swa_rope is not None:
+            partial_swa = swa_rope.get("partial_rotary_factor", 1.0)
+            self.gguf_writer.add_rope_dimension_count_swa(int(head_dim * partial_swa))
+
+        # Attention output gate mode: per-head (broadcasts across head_dim, Laguna-XS)
+        # vs per-element (one gate per (head, head_dim) channel, Laguna-M). Default is
+        # per-element to match configuration_laguna.py (gating defaults to True/per-element).
+        self.gguf_writer.add_attention_gate_per_head(hparams.get("gating", "per-element") == "per-head")
 
         # MoE params
         n_experts = hparams["num_experts"]

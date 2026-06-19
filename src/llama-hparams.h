@@ -182,6 +182,11 @@ struct llama_hparams {
     bool attn_soft_cap = false;
     bool use_kq_norm   = false;
 
+    // Laguna attention output gate: true = per-head (broadcast across head_dim),
+    // false = per-element (one gate per (head, head_dim) channel). Default true
+    // preserves Laguna-XS GGUFs that predate the gate_per_head key.
+    bool attn_gate_per_head = true;
+
     // for Classifiers
     uint32_t n_cls_out = 1;
 

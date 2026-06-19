@@ -184,6 +184,7 @@ class Keys:
         SHARED_KV_LAYERS             = "{arch}.attention.shared_kv_layers"
         SLIDING_WINDOW_PATTERN       = "{arch}.attention.sliding_window_pattern"
         TEMPERATURE_SCALE            = "{arch}.attention.temperature_scale"
+        GATE_PER_HEAD                = "{arch}.attention.gate_per_head"
 
         class Indexer:
             HEAD_COUNT = "{arch}.attention.indexer.head_count"
@@ -4445,6 +4446,7 @@ KEY_ATTENTION_MAX_ALIBI_BIAS    = Keys.Attention.MAX_ALIBI_BIAS
 KEY_ATTENTION_CLAMP_KQV         = Keys.Attention.CLAMP_KQV
 KEY_ATTENTION_LAYERNORM_EPS     = Keys.Attention.LAYERNORM_EPS
 KEY_ATTENTION_LAYERNORM_RMS_EPS = Keys.Attention.LAYERNORM_RMS_EPS
+KEY_ATTENTION_GATE_PER_HEAD     = Keys.Attention.GATE_PER_HEAD
 
 # RoPE
 KEY_ROPE_DIMENSION_COUNT           = Keys.Rope.DIMENSION_COUNT
