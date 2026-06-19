@@ -3,10 +3,12 @@
 void llama_model_laguna::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
 
-    hparams.swa_type = LLAMA_SWA_TYPE_STANDARD;
+    // swa_type is assigned below, once the SWA-layer pattern is known.
 
-    // global layers use half rotary (partial_rotary = 0.5)
-    hparams.n_rot_full = hparams.n_rot_full / 2;
+    // Partial rotary is data-driven: rope.dimension_count (global layers) and
+    // rope.dimension_count.swa (SWA layers) are written by the converter from each rope
+    // config's partial_rotary_factor. Laguna-M uses full rotary (1.0) on every layer;
+    // Laguna-XS uses half rotary (0.5) on global layers and full rotary on SWA layers.
 
     // MoE + SWA parameters
     ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,        hparams.n_ff_exp);
@@ -25,6 +27,14 @@ void llama_model_laguna::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW,  hparams.n_swa);
     ml.get_key(LLM_KV_ROPE_FREQ_BASE_SWA,        hparams.rope_freq_base_train_swa, false);
     ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl, hparams.n_layer(), false);
+
+    // create_memory() requires swa_type != NONE iff is_swa_any(): the iswa KV cache is
+    // only allocated when at least one layer is sliding-window. Laguna-M uses full
+    // attention on every layer -> plain KV cache; Laguna-XS (mixed SWA) -> iswa cache.
+    hparams.swa_type = hparams.is_swa_any() ? LLAMA_SWA_TYPE_STANDARD : LLAMA_SWA_TYPE_NONE;
+
+    // Attention output gate mode: per-head (Laguna-XS) vs per-element (Laguna-M).
+    ml.get_key(LLM_KV_ATTENTION_GATE_PER_HEAD, hparams.attn_gate_per_head, false);
 
     // Global layers use YaRN; load from GGUF (written by converter from full_attention rope config)
     ml.get_key(LLM_KV_ROPE_SCALING_YARN_EXT_FACTOR,  hparams.yarn_ext_factor,  false);
@@ -83,8 +93,10 @@ void llama_model_laguna::load_arch_tensors(llama_model_loader &) {
         create_tensor_qkv(layer, i, n_embd, n_embd_head_k * n_head_l, n_embd_k_gqa, n_embd_v_gqa, 0);
         layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_v * n_head_l, n_embd}, 0);
 
-        // head-wise attention gate (SWA layers only)
-        layer.wqkv_gate = create_tensor(tn(LLM_TENSOR_ATTN_GATE, "weight", i), {n_embd, n_head_l}, TENSOR_NOT_REQUIRED);
+        // attention output gate: per-element on Laguna-M (g_proj output = n_head*head_dim),
+        // per-head on Laguna-XS (g_proj output = n_head, broadcast across head_dim).
+        const uint32_t n_attn_gate_out = hparams.attn_gate_per_head ? n_head_l : (n_head_l * n_embd_head_v);
+        layer.wqkv_gate = create_tensor(tn(LLM_TENSOR_ATTN_GATE, "weight", i), {n_embd, n_attn_gate_out}, TENSOR_NOT_REQUIRED);
 
         layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
 
@@ -118,7 +130,11 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
 
     inpL = build_inp_embd(model.tok_embd);
     ggml_tensor * inp_pos     = build_inp_pos();
-    auto        * inp_attn    = build_attn_inp_kv_iswa();
+    // The iswa attention input requires swa_type != NONE (build_attn_inp_kv_iswa asserts
+    // it); Laguna-M (all full attention) uses the plain KV input instead.
+    const bool has_swa = hparams.is_swa_any();
+    llm_graph_input_attn_kv_iswa * inp_attn_iswa = has_swa ? build_attn_inp_kv_iswa() : nullptr;
+    llm_graph_input_attn_kv      * inp_attn_full = has_swa ? nullptr : build_attn_inp_kv();
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
@@ -179,12 +195,13 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
             cb(Kcur, "Kcur_pos", il);
 
             const float kq_scale = 1.0f / sqrtf(float(n_embd_head_k));
-            ggml_tensor * attn_out = build_attn(inp_attn,
-                    nullptr, nullptr, nullptr,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+            ggml_tensor * attn_out = has_swa
+                    ? build_attn(inp_attn_iswa, nullptr, nullptr, nullptr, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il)
+                    : build_attn(inp_attn_full, nullptr, nullptr, nullptr, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
             cb(attn_out, "attn_out", il);
 
-            // head-wise attention gate (SWA layers only)
+            // attention output gate (per-element on Laguna-M, per-head on Laguna-XS),
+            // applied as attn_out *= softplus(g_proj(x)) before o_proj.
             if (model.layers[il].wqkv_gate) {
                 ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, cur);
                 cb(gate, "attn_gate", il);
@@ -192,14 +209,20 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
                 gate = ggml_softplus(ctx0, gate);
                 cb(gate, "attn_gate_softplus", il);
 
-                ggml_tensor * attn_3d = ggml_reshape_3d(ctx0, attn_out, n_embd_head_v, n_head_l, n_tokens);
-                ggml_tensor * gate_3d = ggml_reshape_3d(ctx0, gate,       1,          n_head_l, n_tokens);
-                cb(gate_3d, "attn_gate_3d", il);
+                if (hparams.attn_gate_per_head) {
+                    // per-head: gate is [n_head_l] per token, broadcast across head_dim
+                    ggml_tensor * attn_3d = ggml_reshape_3d(ctx0, attn_out, n_embd_head_v, n_head_l, n_tokens);
+                    ggml_tensor * gate_3d = ggml_reshape_3d(ctx0, gate,       1,          n_head_l, n_tokens);
+                    cb(gate_3d, "attn_gate_3d", il);
 
-                attn_3d = ggml_mul(ctx0, attn_3d, gate_3d);
-                cb(attn_3d, "attn_gated_3d", il);
+                    attn_3d = ggml_mul(ctx0, attn_3d, gate_3d);
+                    cb(attn_3d, "attn_gated_3d", il);
 
-                attn_out = ggml_reshape_2d(ctx0, attn_3d, n_embd_head_v * n_head_l, n_tokens);
+                    attn_out = ggml_reshape_2d(ctx0, attn_3d, n_embd_head_v * n_head_l, n_tokens);
+                } else {
+                    // per-element: gate is [n_embd_head_v * n_head_l] per token, element-wise
+                    attn_out = ggml_mul(ctx0, attn_out, gate);
+                }
                 cb(attn_out, "attn_gated", il);
             }
 
