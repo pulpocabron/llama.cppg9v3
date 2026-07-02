@@ -4399,6 +4399,101 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .run();
     }
 
+    // Laguna (poolside) tests - delimiter-style reasoning: the template prefills
+    // <think> (thinking on) or </think> (thinking off) as the generation prompt
+    // suffix, so the workaround sets reasoning.start = "" and the reasoning body
+    // starts immediately in the generated stream.
+    {
+        auto tst = peg_tester("models/templates/poolside-Laguna.jinja", detailed_debug);
+
+        // thinking on: bare reasoning terminated by </think>
+        tst.test("I'm thinking</think>Hello, world!\nWhat's up?")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .enable_thinking(true)
+            .expect_reasoning("I'm thinking")
+            .expect_content("Hello, world!\nWhat's up?")
+            .run();
+
+        // thinking off: plain content must not be classified as reasoning
+        tst.test("Hello, world!\nWhat's up?")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .enable_thinking(false)
+            .expect(message_assist)
+            .run();
+
+        // tool call (thinking off), XML-ish tagged format
+        tst.test("I'll call it.\n<tool_call>special_function\n"
+                 "<arg_key>arg1</arg_key>\n<arg_value>1</arg_value>\n</tool_call>")
+            .enable_thinking(false)
+            .tools({ special_function_tool })
+            .expect_content("I'll call it.\n")
+            .expect_tool_calls({ { "special_function", R"({"arg1":1})", "" } })
+            .run();
+
+        // tool call with reasoning (thinking on)
+        tst.test("I need the tool</think>Let me call it.\n<tool_call>special_function\n"
+                 "<arg_key>arg1</arg_key>\n<arg_value>1</arg_value>\n</tool_call>")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .enable_thinking(true)
+            .tools({ special_function_tool })
+            .expect_reasoning("I need the tool")
+            .expect_content("Let me call it.\n")
+            .expect_tool_calls({ { "special_function", R"({"arg1":1})", "" } })
+            .run();
+
+        // Continuation tests: with an empty reasoning.start the continued
+        // reasoning/content must be appended after the prefilled <think>.
+        tst.test("world!\nWhat's up?")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .enable_thinking(true)
+            .messages({ message_user, message_assist_prefill_content })
+            .add_generation_prompt(false)
+            .continue_final_message(COMMON_CHAT_CONTINUATION_CONTENT)
+            .expect_reasoning("I'm thinking")
+            .expect_content("Hello, world!\nWhat's up?")
+            .run();
+
+        tst.test(" thinking</think>Hello, world!\nWhat's up?")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .enable_thinking(true)
+            .messages({ message_user, message_assist_prefill_reasoning })
+            .add_generation_prompt(false)
+            .continue_final_message(COMMON_CHAT_CONTINUATION_REASONING)
+            .expect_reasoning("I'm thinking")
+            .expect_content("Hello, world!\nWhat's up?")
+            .run();
+
+        // Continuation prompt placement: the reasoning body and </think> must land
+        // between the prefilled <think> and the continued content.
+        if (g_template_filter.empty() ||
+            std::string("models/templates/poolside-Laguna.jinja").find(g_template_filter) != std::string::npos) {
+            auto tmpls = read_templates("models/templates/poolside-Laguna.jinja");
+
+            common_chat_templates_inputs inputs;
+            inputs.enable_thinking       = true;
+            inputs.add_generation_prompt = false;
+            inputs.continue_final_message = COMMON_CHAT_CONTINUATION_CONTENT;
+            inputs.messages = { message_user, message_assist_prefill_content };
+
+            auto params = common_chat_templates_apply(tmpls.get(), inputs);
+            assert_equals(true, string_ends_with(params.prompt, "<assistant>\n<think>I'm thinking</think>Hello, "));
+
+            inputs.continue_final_message = COMMON_CHAT_CONTINUATION_REASONING;
+            inputs.messages = { message_user, message_assist_prefill_reasoning };
+
+            params = common_chat_templates_apply(tmpls.get(), inputs);
+            assert_equals(true, string_ends_with(params.prompt, "<assistant>\n<think>I'm"));
+
+            // thinking off: content continues directly after the prefilled </think>
+            inputs.enable_thinking        = false;
+            inputs.continue_final_message = COMMON_CHAT_CONTINUATION_CONTENT;
+            inputs.messages = { message_user, message_assist_prefill_content };
+
+            params = common_chat_templates_apply(tmpls.get(), inputs);
+            assert_equals(true, string_ends_with(params.prompt, "<assistant>\n</think>Hello, "));
+        }
+    }
+
     for (const char * tmpl : {
              "models/templates/LFM2-8B-A1B.jinja",
              "models/templates/LFM2.5-Instruct.jinja",

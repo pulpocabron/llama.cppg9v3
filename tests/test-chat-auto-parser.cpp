@@ -1957,6 +1957,11 @@ static void test_role_markers_all_templates(testing & t) {
         // RWKV-world chat preset: "User: " / "Assistant: "
         { "llama-cpp-rwkv-world.jinja",                      "User:",               "Assistant:"              },
 
+        // Laguna (poolside): <user> / <assistant>; the generation prompt carries a
+        // prefilled <think> (or </think>), which the workaround strips from the
+        // reasoning markers (reasoning.start = "").
+        { "poolside-Laguna.jinja",                           "<user>",                 "<assistant>"                },
+
         // Upstage Solar 100B: <|begin|>{role}... but reasoning marker absorbs
         // the "<|begin|>assistant" prefix from assistant_start.
         { "upstage-Solar-Open-100B.jinja",                   "<|begin|>user<|content|>", "<|begin|>assistant"           },

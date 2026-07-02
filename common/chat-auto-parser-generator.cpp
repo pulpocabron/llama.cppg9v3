@@ -62,6 +62,14 @@ common_chat_params peg_generator::generate_parser(const common_chat_template &  
             if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
                 data.generation_prompt += autoparser.reasoning.end;
             }
+        } else if (!autoparser.reasoning.end.empty() && inputs.enable_thinking) {
+            // Delimiter-style reasoning (empty start, e.g. Laguna): the opening tag is
+            // prefilled by the template as part of the generation prompt, so the reasoning
+            // body is appended directly after it.
+            data.generation_prompt += msg.reasoning_content;
+            if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
+                data.generation_prompt += autoparser.reasoning.end;
+            }
         }
 
         if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
