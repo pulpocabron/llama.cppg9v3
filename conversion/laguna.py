@@ -78,10 +78,10 @@ class LagunaModel(TextModel):
             partial_swa = swa_rope.get("partial_rotary_factor", 1.0)
             self.gguf_writer.add_rope_dimension_count_swa(int(head_dim * partial_swa))
 
-        # Attention output gate mode: per-head (broadcasts across head_dim, Laguna-XS)
-        # vs per-element (one gate per (head, head_dim) channel, Laguna-M). Default is
-        # per-element to match configuration_laguna.py (gating defaults to True/per-element).
-        self.gguf_writer.add_attention_gate_per_head(hparams.get("gating", "per-element") == "per-head")
+        # Attention output gate mode (per-head on Laguna-XS, per-element on Laguna-M) cannot
+        # be read from config: "gating" is a bool (on/off), not a mode string. Detect it from
+        # the actual g_proj tensor shape in modify_tensors() and write the KV there.
+        # per-head: g_proj out_features == n_head(layer);  per-element: == n_head * head_dim.
 
         # MoE params
         n_experts = hparams["num_experts"]
@@ -130,11 +130,21 @@ class LagunaModel(TextModel):
                 self.gguf_writer.add_eot_token_id(tok_id)
 
     _experts: list[dict[str, Tensor]] | None = None
+    _attn_gate_kv_written: bool = False
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        # Squeeze attention gate tensors
+        # Squeeze attention gate tensors. Detect per-head vs per-element mode from the
+        # actual g_proj out_features (config "gating" is a bool, not a mode string): per-head
+        # gates output n_head values (broadcast across head_dim); per-element output n_head*head_dim.
         if name.endswith(".self_attn.g_proj.weight"):
             data_torch = data_torch.squeeze().contiguous()
+            if not self._attn_gate_kv_written:
+                out_features = int(data_torch.shape[0])
+                head_dim = self.hparams.get("head_dim", self.hparams["hidden_size"] // self.hparams["num_attention_heads"])
+                hpl = self.hparams.get("num_attention_heads_per_layer")
+                n_head_layer = hpl[bid] if (hpl is not None and bid is not None and bid < len(hpl)) else self.hparams["num_attention_heads"]
+                self.gguf_writer.add_attention_gate_per_head(out_features == n_head_layer)
+                self._attn_gate_kv_written = True
 
         # Buffer individual expert weight tensors and stack when all collected for a layer
         if bid is not None and re.match(r"model\.layers\.\d+\.mlp\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.weight$", name):
