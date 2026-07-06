@@ -183,7 +183,8 @@ static std::vector<std::function<void(const common_chat_template & tmpl, autopar
       // Also: </assistant> is the EOT token and role-closing tag — add it to additional_stops
       // so it is erased from streaming output (both server API and CLI) before being sent.
       [](const common_chat_template & tmpl, autoparser & analysis) -> void {
-          if (tmpl.src.find("laguna_glm_thinking_v5") != std::string::npos) {
+          if (tmpl.src.find("laguna_glm_thinking_v5") != std::string::npos ||
+              tmpl.src.find("laguna_glm_thinking_v4") != std::string::npos) {
               analysis.reasoning.start = "";
               analysis.reasoning.end   = "</think>";
               analysis.reasoning.mode  = reasoning_mode::TAG_BASED;

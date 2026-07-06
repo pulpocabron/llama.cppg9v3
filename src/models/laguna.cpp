@@ -26,7 +26,20 @@ void llama_model_laguna::load_arch_hparams(llama_model_loader & ml) {
 
     ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW,  hparams.n_swa);
     ml.get_key(LLM_KV_ROPE_FREQ_BASE_SWA,        hparams.rope_freq_base_train_swa, false);
-    ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl, hparams.n_layer(), false);
+    const bool has_swa_pattern =
+        ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl, hparams.n_layer(), false);
+
+    // The fork converter writes sliding_window_pattern (bool array). The official Laguna
+    // GGUFs ship attention.layer_types strings instead; derive the SWA mask from those when
+    // the bool pattern is absent.
+    if (!has_swa_pattern) {
+        std::vector<std::string> layer_types;
+        if (ml.get_arr(LLM_KV_ATTENTION_LAYER_TYPES, layer_types, false)) {
+            for (uint32_t il = 0; il < hparams.n_layer() && il < (uint32_t) layer_types.size(); ++il) {
+                hparams.is_swa_impl[il] = layer_types[il] == "sliding_attention";
+            }
+        }
+    }
 
     // create_memory() requires swa_type != NONE iff is_swa_any(): the iswa KV cache is
     // only allocated when at least one layer is sliding-window. Laguna-M uses full
@@ -266,8 +279,10 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
                     il);
             cb(moe_out, "ffn_moe_out", il);
 
-            // shared expert MLP (if present)
-            if (hparams.n_expert_shared > 0) {
+            // shared expert MLP. Gate on tensor presence, not expert_shared_count: the
+            // official Laguna GGUFs omit that KV (n_expert_shared stays 0) but still ship
+            // the shexp tensors, which must be applied on every MoE layer.
+            if (model.layers[il].ffn_gate_shexp) {
                 ggml_tensor * sh_out = build_ffn(cur,
                         model.layers[il].ffn_up_shexp,   nullptr, nullptr,
                         model.layers[il].ffn_gate_shexp, nullptr, nullptr,

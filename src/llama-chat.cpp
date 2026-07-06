@@ -236,7 +236,7 @@ llm_chat_template llm_chat_detect_template(const std::string & tmpl) {
         return LLM_CHAT_TEMPLATE_PANGU_EMBED;
     } else if (tmpl_contains("<|begin|>") && tmpl_contains("<|end|>") && tmpl_contains("<|content|>")) {
         return LLM_CHAT_TEMPLATE_SOLAR_OPEN;
-    } else if (tmpl_contains("laguna_glm_thinking_v5")) {
+    } else if (tmpl_contains("laguna_glm_thinking_v5") || tmpl_contains("laguna_glm_thinking_v4")) {
         return LLM_CHAT_TEMPLATE_LAGUNA;
     }
     return LLM_CHAT_TEMPLATE_UNKNOWN;
