@@ -115,6 +115,10 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
         n_vocab = 10240;
     } else if (arch == LLM_ARCH_QWEN3TTS) {
         n_vocab = 4096; // must be >= the hard-coded codec head size (3072)
+    } else if (arch == LLM_ARCH_G9V3) {
+        // G9v3's 128-dim heads make Q wider than its hidden state.
+        n_embd = 128;
+        n_head = 2;
     }
 
     const uint32_t n_embd_head = n_embd / n_head;
@@ -173,6 +177,10 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     } else if (arch == LLM_ARCH_MINIMAX_M3) {
         // partial rotary: n_rot must not exceed the indexer key length (64)
         ms.add_kv(LLM_KV_ROPE_DIMENSION_COUNT,       uint32_t(64));
+    } else if (arch == LLM_ARCH_G9V3) {
+        ms.add_kv(LLM_KV_ATTENTION_KEY_LENGTH,   uint32_t(128));
+        ms.add_kv(LLM_KV_ATTENTION_VALUE_LENGTH, uint32_t(128));
+        ms.add_kv(LLM_KV_ROPE_DIMENSION_COUNT,   uint32_t(128));
     }
     ms.add_kv(LLM_KV_ATTENTION_CLAMP_KQV,              1.0f);
     ms.add_kv(LLM_KV_ATTENTION_LAYERNORM_EPS,          1e-5f);
@@ -356,6 +364,7 @@ static bool moe_mandatory(const llm_arch arch) {
         case LLM_ARCH_BAILINGMOE2:
         case LLM_ARCH_DOTS1:
         case LLM_ARCH_AFMOE:
+        case LLM_ARCH_G9V3:
         case LLM_ARCH_ERNIE4_5:
         case LLM_ARCH_ERNIE4_5_MOE:
         case LLM_ARCH_HUNYUAN_MOE:
