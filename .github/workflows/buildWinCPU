@@ -1,0 +1,31 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ G9v3-39A5B ]
+
+jobs:
+  windows-cpu:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Package
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item build\bin\Release\*.exe dist\
+          Copy-Item build\bin\Release\*.dll dist\ -ErrorAction SilentlyContinue
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-cpp-G9v3-39A5B-windows
+          path: dist/
